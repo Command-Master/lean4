@@ -1,7 +1,7 @@
 /-
-Copyright (c) 2023 Scott Morrison. All rights reserved.
+Copyright (c) 2023 Kim Morrison. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
-Authors: Scott Morrison
+Authors: Kim Morrison
 -/
 prelude
 import Lean.Meta.LazyDiscrTree
@@ -59,9 +59,6 @@ private def addImport (name : Name) (constInfo : ConstantInfo) :
         let a := a.push (← InitEntry.fromExpr rhs (name, RwDirection.backward))
         pure a
       | _ => return #[]
-
-/-- Configuration for `DiscrTree`. -/
-def discrTreeConfig : WhnfCoreConfig := {}
 
 /-- Select `=` and `↔` local hypotheses. -/
 def localHypotheses (except : List FVarId := []) : MetaM (Array (Expr × Bool × Nat)) := do

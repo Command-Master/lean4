@@ -247,11 +247,19 @@ structure DefEqCache where
   deriving Inhabited
 
 /--
+  A cache for `inferType` at transparency levels `.default` an `.all`.
+-/
+structure InferTypeCaches where
+  default   : InferTypeCache
+  all       : InferTypeCache
+  deriving Inhabited
+
+/--
   Cache datastructures for type inference, type class resolution, whnf, and definitional equality.
 -/
 structure Cache where
-  inferType      : InferTypeCache := {}
-  funInfo        : FunInfoCache   := {}
+  inferType      : InferTypeCaches := ⟨{}, {}⟩
+  funInfo        : FunInfoCache := {}
   synthInstance  : SynthInstanceCache := {}
   whnfDefault    : WhnfCache := {} -- cache for closed terms and `TransparencyMode.default`
   whnfAll        : WhnfCache := {} -- cache for closed terms and `TransparencyMode.all`
@@ -324,7 +332,7 @@ register_builtin_option maxSynthPendingDepth : Nat := {
   Contextual information for the `MetaM` monad.
 -/
 structure Context where
-  config            : Config               := {}
+  private config    : Config               := {}
   /-- Local context -/
   lctx              : LocalContext         := {}
   /-- Local instances in `lctx`. -/
@@ -448,9 +456,6 @@ instance : MonadBacktrack SavedState MetaM where
   let ((a, s), sCore) ← (x.run ctx s).toIO ctxCore sCore
   pure (a, sCore, s)
 
-instance [MetaEval α] : MetaEval (MetaM α) :=
-  ⟨fun env opts x _ => MetaEval.eval env opts x.run' true⟩
-
 protected def throwIsDefEqStuck : MetaM α :=
   throw <| Exception.internal isDefEqStuckExceptionId
 
@@ -478,8 +483,11 @@ variable [MonadControlT MetaM n] [Monad n]
 @[inline] def modifyCache (f : Cache → Cache) : MetaM Unit :=
   modify fun { mctx, cache, zetaDeltaFVarIds, postponed, diag } => { mctx, cache := f cache, zetaDeltaFVarIds, postponed, diag }
 
-@[inline] def modifyInferTypeCache (f : InferTypeCache → InferTypeCache) : MetaM Unit :=
-  modifyCache fun ⟨ic, c1, c2, c3, c4, c5, c6⟩ => ⟨f ic, c1, c2, c3, c4, c5, c6⟩
+@[inline] def modifyInferTypeCacheDefault (f : InferTypeCache → InferTypeCache) : MetaM Unit :=
+  modifyCache fun ⟨⟨icd, ica⟩, c1, c2, c3, c4, c5, c6⟩ => ⟨⟨f icd, ica⟩, c1, c2, c3, c4, c5, c6⟩
+
+@[inline] def modifyInferTypeCacheAll (f : InferTypeCache → InferTypeCache) : MetaM Unit :=
+  modifyCache fun ⟨⟨icd, ica⟩, c1, c2, c3, c4, c5, c6⟩ => ⟨⟨icd, f ica⟩, c1, c2, c3, c4, c5, c6⟩
 
 @[inline] def modifyDefEqTransientCache (f : DefEqCache → DefEqCache) : MetaM Unit :=
   modifyCache fun ⟨c1, c2, c3, c4, c5, defeqTrans, c6⟩ => ⟨c1, c2, c3, c4, c5, f defeqTrans, c6⟩
@@ -489,6 +497,9 @@ variable [MonadControlT MetaM n] [Monad n]
 
 @[inline] def resetDefEqPermCaches : MetaM Unit :=
   modifyDefEqPermCache fun _ => {}
+
+@[inline] def resetSynthInstanceCache : MetaM Unit :=
+  modifyCache fun c => {c with synthInstance := {}}
 
 @[inline] def modifyDiag (f : Diagnostics → Diagnostics) : MetaM Unit := do
   if (← isDiagnosticsEnabled) then
@@ -932,6 +943,15 @@ def elimMVarDeps (xs : Array Expr) (e : Expr) (preserveOrder : Bool := false) : 
 @[inline] def withConfig (f : Config → Config) : n α → n α :=
   mapMetaM <| withReader (fun ctx => { ctx with config := f ctx.config })
 
+@[inline] def withCanUnfoldPred (p : Config → ConstantInfo → CoreM Bool) : n α → n α :=
+  mapMetaM <| withReader (fun ctx => { ctx with canUnfold? := p })
+
+@[inline] def withIncSynthPending : n α → n α :=
+  mapMetaM <| withReader (fun ctx => { ctx with synthPendingDepth := ctx.synthPendingDepth + 1 })
+
+@[inline] def withInTypeClassResolution : n α → n α :=
+  mapMetaM <| withReader (fun ctx => { ctx with inTypeClassResolution := true })
+
 /--
 Executes `x` tracking zetaDelta reductions `Config.trackZetaDelta := true`
 -/
@@ -942,7 +962,7 @@ Executes `x` tracking zetaDelta reductions `Config.trackZetaDelta := true`
   withConfig (fun cfg => { cfg with proofIrrelevance := false }) x
 
 @[inline] def withTransparency (mode : TransparencyMode) : n α → n α :=
-  mapMetaM <| withConfig (fun config => { config with transparency := mode })
+  withConfig (fun config => { config with transparency := mode })
 
 /-- `withDefault x` executes `x` using the default transparency setting. -/
 @[inline] def withDefault (x : n α) : n α :=
@@ -1070,7 +1090,7 @@ mutual
   private partial def withNewLocalInstancesImp
       (fvars : Array Expr) (i : Nat) (k : MetaM α) : MetaM α := do
     if h : i < fvars.size then
-      let fvar := fvars.get ⟨i, h⟩
+      let fvar := fvars[i]
       let decl ← getFVarLocalDecl fvar
       match (← isClassQuick? decl.type) with
       | .none   => withNewLocalInstancesImp fvars (i+1) k
@@ -1411,6 +1431,14 @@ def withLocalDecl (name : Name) (bi : BinderInfo) (type : Expr) (k : Expr → n 
 def withLocalDeclD (name : Name) (type : Expr) (k : Expr → n α) : n α :=
   withLocalDecl name BinderInfo.default type k
 
+/--
+Similar to `withLocalDecl`, but it does **not** check whether the new variable is a local instance or not.
+-/
+def withLocalDeclNoLocalInstanceUpdate (name : Name) (bi : BinderInfo) (type : Expr) (x : Expr → MetaM α) : MetaM α := do
+  let fvarId ← mkFreshFVarId
+  withReader (fun ctx => { ctx with lctx := ctx.lctx.mkLocalDecl fvarId name type bi }) do
+    x (mkFVar fvarId)
+
 /-- Append an array of free variables `xs` to the local context and execute `k xs`.
 `declInfos` takes the form of an array consisting of:
 - the name of the variable
@@ -1527,11 +1555,11 @@ def withReplaceFVarId {α} (fvarId : FVarId) (e : Expr) : MetaM α → MetaM α 
     localInstances := ctx.localInstances.erase fvarId }
 
 /--
-  `withNewMCtxDepth k` executes `k` with a higher metavariable context depth,
-  where metavariables created outside the `withNewMCtxDepth` (with a lower depth) cannot be assigned.
-  If `allowLevelAssignments` is set to true, then the level metavariable depth
-  is not increased, and level metavariables from the outer scope can be
-  assigned.  (This is used by TC synthesis.)
+`withNewMCtxDepth k` executes `k` with a higher metavariable context depth,
+where metavariables created outside the `withNewMCtxDepth` (with a lower depth) cannot be assigned.
+If `allowLevelAssignments` is set to true, then the level metavariable depth
+is not increased, and level metavariables from the outer scope can be
+assigned.  (This is used by TC synthesis.)
 -/
 def withNewMCtxDepth (k : n α) (allowLevelAssignments := false) : n α :=
   mapMetaM (withNewMCtxDepthImp allowLevelAssignments) k
@@ -1541,12 +1569,19 @@ private def withLocalContextImp (lctx : LocalContext) (localInsts : LocalInstanc
     x
 
 /--
-  `withLCtx lctx localInsts k` replaces the local context and local instances, and then executes `k`.
-  The local context and instances are restored after executing `k`.
-  This method assumes that the local instances in `localInsts` are in the local context `lctx`.
+`withLCtx lctx localInsts k` replaces the local context and local instances, and then executes `k`.
+The local context and instances are restored after executing `k`.
+This method assumes that the local instances in `localInsts` are in the local context `lctx`.
 -/
 def withLCtx (lctx : LocalContext) (localInsts : LocalInstances) : n α → n α :=
   mapMetaM <| withLocalContextImp lctx localInsts
+
+/--
+Simpler version of `withLCtx` which just updates the local context. It is the resposability of the
+caller ensure the local instances are also properly updated.
+-/
+def withLCtx' (lctx : LocalContext) : n α → n α :=
+  mapMetaM <| withReader (fun ctx => { ctx with lctx })
 
 /--
 Runs `k` in a local environment with the `fvarIds` erased.
@@ -1639,7 +1674,7 @@ def setInlineAttribute (declName : Name) (kind := Compiler.InlineAttributeKind.i
 
 private partial def instantiateForallAux (ps : Array Expr) (i : Nat) (e : Expr) : MetaM Expr := do
   if h : i < ps.size then
-    let p := ps.get ⟨i, h⟩
+    let p := ps[i]
     match (← whnf e) with
     | .forallE _ _ b _ => instantiateForallAux ps (i+1) (b.instantiate1 p)
     | _                => throwError "invalid instantiateForall, too many parameters"
@@ -1652,7 +1687,7 @@ def instantiateForall (e : Expr) (ps : Array Expr) : MetaM Expr :=
 
 private partial def instantiateLambdaAux (ps : Array Expr) (i : Nat) (e : Expr) : MetaM Expr := do
   if h : i < ps.size then
-    let p := ps.get ⟨i, h⟩
+    let p := ps[i]
     match (← whnf e) with
     | .lam _ _ b _ => instantiateLambdaAux ps (i+1) (b.instantiate1 p)
     | _            => throwError "invalid instantiateLambda, too many parameters"
@@ -1766,7 +1801,7 @@ private def exposeRelevantUniverses (e : Expr) (p : Level → Bool) : Expr :=
     | .sort u     => if p u then some (e.setPPUniverses true) else none
     | _           => none
 
-private def mkLeveErrorMessageCore (header : String) (entry : PostponedEntry) : MetaM MessageData := do
+private def mkLevelErrorMessageCore (header : String) (entry : PostponedEntry) : MetaM MessageData := do
   match entry.ctx? with
   | none =>
     return m!"{header}{indentD m!"{entry.lhs} =?= {entry.rhs}"}"
@@ -1783,10 +1818,10 @@ private def mkLeveErrorMessageCore (header : String) (entry : PostponedEntry) : 
         addMessageContext m!"{header}{indentD m!"{entry.lhs} =?= {entry.rhs}"}\nwhile trying to unify{indentD lhs}\nwith{indentD rhs}"
 
 def mkLevelStuckErrorMessage (entry : PostponedEntry) : MetaM MessageData := do
-  mkLeveErrorMessageCore "stuck at solving universe constraint" entry
+  mkLevelErrorMessageCore "stuck at solving universe constraint" entry
 
 def mkLevelErrorMessage (entry : PostponedEntry) : MetaM MessageData := do
-  mkLeveErrorMessageCore "failed to solve universe constraint" entry
+  mkLevelErrorMessageCore "failed to solve universe constraint" entry
 
 private def processPostponedStep (exceptionOnFailure : Bool) : MetaM Bool := do
   let ps ← getResetPostponed

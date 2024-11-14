@@ -15,7 +15,7 @@ namespace Lean.Meta.MatcherApp
 /-- Auxiliary function for MatcherApp.addArg -/
 private partial def updateAlts (unrefinedArgType : Expr) (typeNew : Expr) (altNumParams : Array Nat) (alts : Array Expr) (refined : Bool) (i : Nat) : MetaM (Array Nat × Array Expr) := do
   if h : i < alts.size then
-    let alt       := alts.get ⟨i, h⟩
+    let alt       := alts[i]
     let numParams := altNumParams[i]!
     let typeNew ← whnfD typeNew
     match typeNew with
@@ -29,7 +29,7 @@ private partial def updateAlts (unrefinedArgType : Expr) (typeNew : Expr) (altNu
           else
             pure <| !(← isDefEq unrefinedArgType (← inferType x[0]!))
           return (← mkLambdaFVars xs alt, refined)
-      updateAlts unrefinedArgType (b.instantiate1 alt) (altNumParams.set! i (numParams+1)) (alts.set ⟨i, h⟩ alt) refined (i+1)
+      updateAlts unrefinedArgType (b.instantiate1 alt) (altNumParams.set! i (numParams+1)) (alts.set i alt) refined (i+1)
     | _ => throwError "unexpected type at MatcherApp.addArg"
   else
     if refined then
@@ -49,7 +49,7 @@ private partial def updateAlts (unrefinedArgType : Expr) (typeNew : Expr) (altNu
   - the `matcherApp.motive` is a lambda abstraction where `xs.size == discrs.size`
   - each alternative is a lambda abstraction where `ys_i.size == matcherApp.altNumParams[i]`
 
-  This is used in in `Lean.Elab.PreDefinition.WF.Fix` when replacing recursive calls with calls to
+  This is used in `Lean.Elab.PreDefinition.WF.Fix` when replacing recursive calls with calls to
   the argument provided by `fix` to refine the termination argument, which may mention `major`.
   See there for how to use this function.
 -/
@@ -108,7 +108,7 @@ def addArg? (matcherApp : MatcherApp) (e : Expr) : MetaM (Option MatcherApp) :=
   This is similar to `MatcherApp.addArg` when you only have an expression to
   refined, and not a type with a value.
 
-  This is used in in `Lean.Elab.PreDefinition.WF.GuessFix` when constructing the context of recursive
+  This is used in `Lean.Elab.PreDefinition.WF.GuessFix` when constructing the context of recursive
   calls to refine the functions' parameter, which may mention `major`.
   See there for how to use this function.
 -/
@@ -162,7 +162,7 @@ def refineThrough? (matcherApp : MatcherApp) (e : Expr) :
 private def withUserNamesImpl {α} (fvars : Array Expr) (names : Array Name) (k : MetaM α) : MetaM α := do
   let lctx := (Array.zip fvars names).foldl (init := ← (getLCtx)) fun lctx (fvar, name) =>
     lctx.setUserName fvar.fvarId! name
-  withTheReader Meta.Context (fun ctx => { ctx with lctx }) k
+  withLCtx' lctx k
 
 /--
 Sets the user name of the FVars in the local context according to the given array of names.
@@ -202,7 +202,7 @@ NB: Not all operations on `MatcherApp` can handle one `matcherName` is a splitte
 If `addEqualities` is true, then equalities connecting the discriminant to the parameters of the
 alternative (like in `match h : x with …`) are be added, if not already there.
 
-This function works even if the the type of alternatives do *not* fit the inferred type. This
+This function works even if the type of alternatives do *not* fit the inferred type. This
 allows you to post-process the `MatcherApp` with `MatcherApp.inferMatchType`, which will
 infer a type, given all the alternatives.
 -/

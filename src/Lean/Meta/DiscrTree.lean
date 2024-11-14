@@ -1,7 +1,7 @@
 /-
 Copyright (c) 2019 Microsoft Corporation. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
-Authors: Leonardo de Moura, Jannis Limperg, Scott Morrison
+Authors: Leonardo de Moura, Jannis Limperg, Kim Morrison
 -/
 prelude
 import Lean.Meta.WHNF
@@ -76,7 +76,7 @@ def Key.format : Key → Format
   | .const k _       => Std.format k
   | .proj s i _      => Std.format s ++ "." ++ Std.format i
   | .fvar k _        => Std.format k.name
-  | .arrow           => "→"
+  | .arrow           => "∀"
 
 instance : ToFormat Key := ⟨Key.format⟩
 
@@ -113,7 +113,8 @@ where
       mkApp m!"{mkFVar fvarId}" (← goN nargs) parenIfNonAtomic
     | .proj _ i nargs =>
       mkApp m!"{← go}.{i+1}" (← goN nargs) parenIfNonAtomic
-    | .arrow => return "<arrow>"
+    | .arrow =>
+      mkApp m!"∀ " (← goN 1) parenIfNonAtomic
     | .star => return "_"
     | .other => return "<other>"
     | .lit (.natVal v) => return m!"{v}"
@@ -129,21 +130,15 @@ def Key.arity : Key → Nat
   | .const _ a  => a
   | .fvar _ a   => a
   /-
-  Remark: `.arrow` used to have arity 2, and was used to encode non-dependent arrows.
-  However, this feature was a recurrent source of bugs. For example, a theorem about
-  a dependent arrow can be applied to a non-dependent one. The reverse direction may
-  also happen. See issue #2835.
-  ```
-  -- A theorem about the non-dependent arrow `a → a`
-  theorem imp_self' {a : Prop} : (a → a) ↔ True := ⟨fun _ => trivial, fun _ => id⟩
-
-  -- can be applied to the dependent one `(h : P a) → P (f h)`.
-  example {α : Prop} {P : α → Prop} {f : ∀ {a}, P a → α} {a : α} : (h : P a) → P (f h) := by
-    simp only [imp_self']
-  ```
-  Thus, we now index dependent and non-dependent arrows using the key `.arrow` with arity 0.
+  Remark: `.arrow` used to have arity 2, and was used to encode only **non**-dependent
+  arrows. However, this feature was a recurrent source of bugs. For example, a
+  theorem about a dependent arrow can be applied to a non-dependent one. The
+  reverse direction may also happen. See issue #2835. Therefore, `.arrow` was made
+  to have arity 0. But this throws away easy to use information, and makes it so
+  that ∀ and ∃ behave quite differently. So now `.arrow` at least indexes the
+  domain of the forall (whether dependent or non-dependent).
   -/
-  | .arrow      => 0
+  | .arrow      => 1
   | .proj _ _ a => 1 + a
   | _           => 0
 
@@ -207,7 +202,7 @@ instance : Inhabited (DiscrTree α) where
 -/
 private def ignoreArg (a : Expr) (i : Nat) (infos : Array ParamInfo) : MetaM Bool := do
   if h : i < infos.size then
-    let info := infos.get ⟨i, h⟩
+    let info := infos[i]
     if info.isInstImplicit then
       return true
     else if info.isImplicit || info.isStrictImplicit then
@@ -422,7 +417,8 @@ private def pushArgs (root : Bool) (todo : Array Expr) (e : Expr) (config : Whnf
         return (.other, todo)
       else
         return (.star, todo)
-    | .forallE .. => return (.arrow, todo)
+    | .forallE _n d _ _ =>
+      return (.arrow, todo.push d)
     | _ => return (.other, todo)
 
 @[inherit_doc pushArgs]
@@ -430,7 +426,7 @@ partial def mkPathAux (root : Bool) (todo : Array Expr) (keys : Array Key) (conf
   if todo.isEmpty then
     return keys
   else
-    let e    := todo.back
+    let e    := todo.back!
     let todo := todo.pop
     let (k, todo) ← pushArgs root todo e config noIndexAtArgs
     mkPathAux false todo (keys.push k) config noIndexAtArgs
@@ -446,7 +442,7 @@ def mkPath (e : Expr) (config : WhnfCoreConfig) (noIndexAtArgs := false) : MetaM
 
 private partial def createNodes (keys : Array Key) (v : α) (i : Nat) : Trie α :=
   if h : i < keys.size then
-    let k := keys.get ⟨i, h⟩
+    let k := keys[i]
     let c := createNodes keys v (i+1)
     .node #[] #[(k, c)]
   else
@@ -464,7 +460,7 @@ where
   loop (i : Nat) : Array α :=
     if h : i < vs.size then
       if v == vs[i] then
-        vs.set ⟨i,h⟩ v
+        vs.set i v
       else
         loop (i+1)
     else
@@ -474,7 +470,7 @@ where
 private partial def insertAux [BEq α] (keys : Array Key) (v : α) : Nat → Trie α → Trie α
   | i, .node vs cs =>
     if h : i < keys.size then
-      let k := keys.get ⟨i, h⟩
+      let k := keys[i]
       let c := Id.run $ cs.binInsertM
           (fun a b => a.1 < b.1)
           (fun ⟨_, s⟩ => let c := insertAux keys v (i+1) s; (k, c)) -- merge with existing
@@ -557,8 +553,8 @@ private def getKeyArgs (e : Expr) (isMatch root : Bool) (config : WhnfCoreConfig
     if isMatch then
       return (.other, #[])
     else do
-      let ctx ← read
-      if ctx.config.isDefEqStuckEx then
+      let cfg ← getConfig
+      if cfg.isDefEqStuckEx then
         /-
           When the configuration flag `isDefEqStuckEx` is set to true,
           we want `isDefEq` to throw an exception whenever it tries to assign
@@ -581,7 +577,7 @@ private def getKeyArgs (e : Expr) (isMatch root : Bool) (config : WhnfCoreConfig
   | .proj s i a .. =>
     let nargs := e.getAppNumArgs
     return (.proj s i nargs, #[a] ++ e.getAppRevArgs)
-  | .forallE .. => return (.arrow, #[])
+  | .forallE _ d _ _ => return (.arrow, #[d])
   | _ => return (.other, #[])
 
 private abbrev getMatchKeyArgs (e : Expr) (root : Bool) (config : WhnfCoreConfig) : MetaM (Key × Array Expr) :=
@@ -607,7 +603,7 @@ private partial def getMatchLoop (todo : Array Expr) (c : Trie α) (result : Arr
     else if cs.isEmpty then
       return result
     else
-      let e     := todo.back
+      let e     := todo.back!
       let todo  := todo.pop
       let first := cs[0]! /- Recall that `Key.star` is the minimal key -/
       let (k, args) ← getMatchKeyArgs e (root := false) config
@@ -752,7 +748,7 @@ where
       else if cs.isEmpty then
         return result
       else
-        let e     := todo.back
+        let e     := todo.back!
         let todo  := todo.pop
         let (k, args) ← getUnifyKeyArgs e (root := false) config
         let visitStar (result : Array α) : MetaM (Array α) :=
@@ -770,9 +766,6 @@ where
         | _      => visitNonStar k args (← visitStar result)
 
 namespace Trie
-
--- `Inhabited` instance to allow `partial` definitions below.
-private local instance [Monad m] : Inhabited (σ → β → m σ) := ⟨fun s _ => pure s⟩
 
 /--
 Monadically fold the keys and values stored in a `Trie`.

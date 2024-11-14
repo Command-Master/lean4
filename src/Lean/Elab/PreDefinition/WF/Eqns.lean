@@ -57,7 +57,9 @@ private partial def mkProof (declName : Name) (type : Expr) : MetaM Expr := do
         go mvarId
       else if let some mvarId ← whnfReducibleLHS? mvarId then
         go mvarId
-      else match (← simpTargetStar mvarId { config.dsimp := false } (simprocs := {})).1 with
+      else
+        let ctx ← Simp.mkContext (config := { dsimp := false })
+        match (← simpTargetStar mvarId ctx (simprocs := {})).1 with
         | TacticResultCNM.closed => return ()
         | TacticResultCNM.modified mvarId => go mvarId
         | TacticResultCNM.noChange =>
@@ -83,9 +85,9 @@ def mkEqns (declName : Name) (info : EqnInfo) : MetaM (Array Name) :=
     withReducible do
       mkEqnTypes info.declNames goal.mvarId!
   let mut thmNames := #[]
-  for i in [: eqnTypes.size] do
-    let type := eqnTypes[i]!
-    trace[Elab.definition.wf.eqns] "{eqnTypes[i]!}"
+  for h : i in [: eqnTypes.size] do
+    let type := eqnTypes[i]
+    trace[Elab.definition.wf.eqns] "{eqnTypes[i]}"
     let name := (Name.str baseName eqnThmSuffixBase).appendIndexAfter (i+1)
     thmNames := thmNames.push name
     let value ← mkProof declName type

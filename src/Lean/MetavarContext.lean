@@ -17,13 +17,13 @@ assignments. It is used in the elaborator, tactic framework, unifier
 the requirements imposed by these modules.
 
 - We may invoke TC while executing `isDefEq`. We need this feature to
-  WellFoundedRelationbe able to solve unification problems such as:
+  be able to solve unification problems such as:
   ```
   f ?a (ringAdd ?s) ?x ?y =?= f Int intAdd n m
   ```
   where `(?a : Type) (?s : Ring ?a) (?x ?y : ?a)`.
 
-  During `isDefEq` (i.e., unification), it will need to solve the constrain
+  During `isDefEq` (i.e., unification), it will need to solve the constraint
   ```
   ringAdd ?s =?= intAdd
   ```
@@ -179,7 +179,7 @@ the requirements imposed by these modules.
   an exception instead of return `false` whenever it tries to assign
   a metavariable owned by its caller. The idea is to sign to the caller that
   it cannot solve the TC problem at this point, and more information is needed.
-  That is, the caller must make progress an assign its metavariables before
+  That is, the caller must make progress and assign its metavariables before
   trying to invoke TC again.
 
   In Lean4, we are using a simpler design for the `MetavarContext`.
@@ -879,10 +879,6 @@ def incDepth (mctx : MetavarContext) (allowLevelAssignments := false) : MetavarC
     if allowLevelAssignments then mctx.levelAssignDepth else depth
   { mctx with depth, levelAssignDepth }
 
-instance : MonadMCtx (StateRefT MetavarContext (ST ω)) where
-  getMCtx    := get
-  modifyMCtx := modify
-
 namespace MkBinding
 
 inductive Exception where
@@ -1275,10 +1271,10 @@ def mkBinding (isLambda : Bool) (xs : Array Expr) (e : Expr) (usedOnly : Bool :=
   MkBinding.mkBinding isLambda ctx.lctx xs e usedOnly usedLetOnly etaReduce { preserveOrder := false, binderInfoForMVars, mvarIdsToAbstract, mainModule := ctx.mainModule }
 
 @[inline] def mkLambda (xs : Array Expr) (e : Expr) (usedOnly : Bool := false) (usedLetOnly : Bool := true) (etaReduce := false) (binderInfoForMVars := BinderInfo.implicit) : MkBindingM Expr :=
-  return ← mkBinding (isLambda := true) xs e usedOnly usedLetOnly etaReduce binderInfoForMVars
+  mkBinding (isLambda := true) xs e usedOnly usedLetOnly etaReduce binderInfoForMVars
 
 @[inline] def mkForall (xs : Array Expr) (e : Expr) (usedOnly : Bool := false) (usedLetOnly : Bool := true) (binderInfoForMVars := BinderInfo.implicit) : MkBindingM Expr :=
-  return ← mkBinding (isLambda := false) xs e usedOnly usedLetOnly false binderInfoForMVars
+  mkBinding (isLambda := false) xs e usedOnly usedLetOnly false binderInfoForMVars
 
 @[inline] def abstractRange (e : Expr) (n : Nat) (xs : Array Expr) : MkBindingM Expr := fun ctx =>
   MkBinding.abstractRange xs n e { preserveOrder := false, mainModule := ctx.mainModule }

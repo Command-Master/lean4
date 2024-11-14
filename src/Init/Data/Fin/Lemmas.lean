@@ -13,17 +13,19 @@ import Init.Omega
 
 namespace Fin
 
-/-- If you actually have an element of `Fin n`, then the `n` is always positive -/
-theorem size_pos (i : Fin n) : 0 < n := Nat.lt_of_le_of_lt (Nat.zero_le _) i.2
+@[deprecated Fin.pos (since := "2024-11-11")]
+theorem size_pos (i : Fin n) : 0 < n := i.pos
 
 theorem mod_def (a m : Fin n) : a % m = Fin.mk (a % m) (Nat.lt_of_le_of_lt (Nat.mod_le _ _) a.2) :=
   rfl
 
-theorem mul_def (a b : Fin n) : a * b = Fin.mk ((a * b) % n) (Nat.mod_lt _ a.size_pos) := rfl
+theorem mul_def (a b : Fin n) : a * b = Fin.mk ((a * b) % n) (Nat.mod_lt _ a.pos) := rfl
 
-theorem sub_def (a b : Fin n) : a - b = Fin.mk (((n - b) + a) % n) (Nat.mod_lt _ a.size_pos) := rfl
+theorem sub_def (a b : Fin n) : a - b = Fin.mk (((n - b) + a) % n) (Nat.mod_lt _ a.pos) := rfl
 
-theorem size_pos' : ∀ [Nonempty (Fin n)], 0 < n | ⟨i⟩ => i.size_pos
+theorem pos' : ∀ [Nonempty (Fin n)], 0 < n | ⟨i⟩ => i.pos
+
+@[deprecated pos' (since := "2024-11-11")] abbrev size_pos' := @pos'
 
 @[simp] theorem is_lt (a : Fin n) : (a : Nat) < n := a.2
 
@@ -240,13 +242,17 @@ theorem fin_one_eq_zero (a : Fin 1) : a = 0 := Subsingleton.elim a 0
   rw [eq_comm]
   simp
 
-theorem add_def (a b : Fin n) : a + b = Fin.mk ((a + b) % n) (Nat.mod_lt _ a.size_pos) := rfl
+theorem add_def (a b : Fin n) : a + b = Fin.mk ((a + b) % n) (Nat.mod_lt _ a.pos) := rfl
 
 theorem val_add (a b : Fin n) : (a + b).val = (a.val + b.val) % n := rfl
 
-@[simp] protected theorem zero_add {n : Nat} [NeZero n] (i : Fin n) : (0 : Fin n) + i = i := by
+@[simp] protected theorem zero_add [NeZero n] (k : Fin n) : (0 : Fin n) + k = k := by
   ext
-  simp [Fin.add_def, Nat.mod_eq_of_lt i.2]
+  simp [Fin.add_def, Nat.mod_eq_of_lt k.2]
+
+@[simp] protected theorem add_zero [NeZero n] (k : Fin n) : k + 0 = k := by
+  ext
+  simp [add_def, Nat.mod_eq_of_lt k.2]
 
 theorem val_add_one_of_lt {n : Nat} {i : Fin n.succ} (h : i < last _) : (i + 1).1 = i + 1 := by
   match n with
@@ -582,8 +588,8 @@ theorem rev_succ (k : Fin n) : rev (succ k) = castSucc (rev k) := k.rev_addNat 1
 @[simp] theorem coe_pred (j : Fin (n + 1)) (h : j ≠ 0) : (j.pred h : Nat) = j - 1 := rfl
 
 @[simp] theorem succ_pred : ∀ (i : Fin (n + 1)) (h : i ≠ 0), (i.pred h).succ = i
-  | ⟨0, h⟩, hi => by simp only [mk_zero, ne_eq, not_true] at hi
-  | ⟨n + 1, h⟩, hi => rfl
+  | ⟨0, _⟩, hi => by simp only [mk_zero, ne_eq, not_true] at hi
+  | ⟨_ + 1, _⟩, _ => rfl
 
 @[simp]
 theorem pred_succ (i : Fin n) {h : i.succ ≠ 0} : i.succ.pred h = i := by
@@ -636,7 +642,7 @@ theorem pred_add_one (i : Fin (n + 2)) (h : (i : Nat) < n + 1) :
   ext
   simp
 
-@[simp] theorem subNat_one_succ (i : Fin (n + 1)) (h : 1 ≤ ↑i) : (subNat 1 i h).succ = i := by
+@[simp] theorem subNat_one_succ (i : Fin (n + 1)) (h : 1 ≤ (i : Nat)) : (subNat 1 i h).succ = i := by
   ext
   simp
   omega

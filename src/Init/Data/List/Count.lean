@@ -153,12 +153,14 @@ theorem countP_filterMap (p : β → Bool) (f : α → Option β) (l : List α) 
   simp only [length_filterMap_eq_countP]
   congr
   ext a
-  simp (config := { contextual := true }) [Option.getD_eq_iff]
+  simp +contextual [Option.getD_eq_iff, Option.isSome_eq_isSome]
 
-@[simp] theorem countP_join (l : List (List α)) :
-    countP p l.join = Nat.sum (l.map (countP p)) := by
-  simp only [countP_eq_length_filter, filter_join]
+@[simp] theorem countP_flatten (l : List (List α)) :
+    countP p l.flatten = (l.map (countP p)).sum := by
+  simp only [countP_eq_length_filter, filter_flatten]
   simp [countP_eq_length_filter']
+
+@[deprecated countP_flatten (since := "2024-10-14")] abbrev countP_join := @countP_flatten
 
 @[simp] theorem countP_reverse (l : List α) : countP p l.reverse = countP p l := by
   simp [countP_eq_length_filter, filter_reverse]
@@ -230,8 +232,10 @@ theorem count_singleton (a b : α) : count a [b] = if b == a then 1 else 0 := by
 @[simp] theorem count_append (a : α) : ∀ l₁ l₂, count a (l₁ ++ l₂) = count a l₁ + count a l₂ :=
   countP_append _
 
-theorem count_join (a : α) (l : List (List α)) : count a l.join = Nat.sum (l.map (count a)) := by
-  simp only [count_eq_countP, countP_join, count_eq_countP']
+theorem count_flatten (a : α) (l : List (List α)) : count a l.flatten = (l.map (count a)).sum := by
+  simp only [count_eq_countP, countP_flatten, count_eq_countP']
+
+@[deprecated count_flatten (since := "2024-10-14")] abbrev count_join := @count_flatten
 
 @[simp] theorem count_reverse (a : α) (l : List α) : count a l.reverse = count a l := by
   simp only [count_eq_countP, countP_eq_length_filter, filter_reverse, length_reverse]
@@ -311,7 +315,7 @@ theorem replicate_count_eq_of_count_eq_length {l : List α} (h : count a l = len
 theorem count_le_count_map [DecidableEq β] (l : List α) (f : α → β) (x : α) :
     count x l ≤ count (f x) (map f l) := by
   rw [count, count, countP_map]
-  apply countP_mono_left; simp (config := { contextual := true })
+  apply countP_mono_left; simp +contextual
 
 theorem count_filterMap {α} [BEq β] (b : β) (f : α → Option β) (l : List α) :
     count b (filterMap f l) = countP (fun a => f a == some b) l := by

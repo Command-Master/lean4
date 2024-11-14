@@ -328,7 +328,7 @@ private def invalidExtMsg := "invalid environment extension has been accessed"
 
 unsafe def setState {σ} (ext : Ext σ) (exts : Array EnvExtensionState) (s : σ) : Array EnvExtensionState :=
   if h : ext.idx < exts.size then
-    exts.set ⟨ext.idx, h⟩ (unsafeCast s)
+    exts.set ext.idx (unsafeCast s)
   else
     have : Inhabited (Array EnvExtensionState) := ⟨exts⟩
     panic! invalidExtMsg
@@ -345,7 +345,7 @@ unsafe def setState {σ} (ext : Ext σ) (exts : Array EnvExtensionState) (s : σ
 
 unsafe def getState {σ} [Inhabited σ] (ext : Ext σ) (exts : Array EnvExtensionState) : σ :=
   if h : ext.idx < exts.size then
-    let s : EnvExtensionState := exts.get ⟨ext.idx, h⟩
+    let s : EnvExtensionState := exts[ext.idx]
     unsafeCast s
   else
     panic! invalidExtMsg
@@ -451,7 +451,7 @@ modify it, use `PersistentEnvExtension.addEntry`, with an `addEntryFn` that perf
 modification.
 
 When a module is loaded, the values saved by all of its dependencies for this
-`PersistentEnvExtension` are are available as an `Array (Array α)` via the environment extension,
+`PersistentEnvExtension` are available as an `Array (Array α)` via the environment extension,
 with one array per transitively imported module. The state of type `σ` used in the current module
 can be initialized from these imports by specifying a suitable `addImportedFn`. The `addImportedFn`
 runs at the beginning of elaboration for every module, so it's usually better for performance to
@@ -515,11 +515,11 @@ def addEntry {α β σ : Type} (ext : PersistentEnvExtension α β σ) (env : En
 def getState {α β σ : Type} [Inhabited σ] (ext : PersistentEnvExtension α β σ) (env : Environment) : σ :=
   (ext.toEnvExtension.getState env).state
 
-/-- Set the current state of the given extension in the given environment. This change is *not* persisted across files. -/
+/-- Set the current state of the given extension in the given environment. -/
 def setState {α β σ : Type} (ext : PersistentEnvExtension α β σ) (env : Environment) (s : σ) : Environment :=
   ext.toEnvExtension.modifyState env fun ps => { ps with  state := s }
 
-/-- Modify the state of the given extension in the given environment by applying the given function. This change is *not* persisted across files. -/
+/-- Modify the state of the given extension in the given environment by applying the given function. -/
 def modifyState {α β σ : Type} (ext : PersistentEnvExtension α β σ) (env : Environment) (f : σ → σ) : Environment :=
   ext.toEnvExtension.modifyState env fun ps => { ps with state := f (ps.state) }
 
@@ -638,20 +638,21 @@ end TagDeclarationExtension
 /-- Environment extension for mapping declarations to values.
     Declarations must only be inserted into the mapping in the module where they were declared. -/
 
-def MapDeclarationExtension (α : Type) := SimplePersistentEnvExtension (Name × α) (NameMap α)
+def MapDeclarationExtension (α : Type) := PersistentEnvExtension (Name × α) (Name × α) (NameMap α)
 
 def mkMapDeclarationExtension (name : Name := by exact decl_name%) : IO (MapDeclarationExtension α) :=
-  registerSimplePersistentEnvExtension {
-    name          := name,
-    addImportedFn := fun _ => {},
-    addEntryFn    := fun s n => s.insert n.1 n.2 ,
-    toArrayFn     := fun es => es.toArray.qsort (fun a b => Name.quickLt a.1 b.1)
+  registerPersistentEnvExtension {
+    name            := name,
+    mkInitial       := pure {}
+    addImportedFn   := fun _ => pure {}
+    addEntryFn      := fun s (n, v) => s.insert n v
+    exportEntriesFn := fun s => s.toArray
   }
 
 namespace MapDeclarationExtension
 
 instance : Inhabited (MapDeclarationExtension α) :=
-  inferInstanceAs (Inhabited (SimplePersistentEnvExtension ..))
+  inferInstanceAs (Inhabited (PersistentEnvExtension ..))
 
 def insert (ext : MapDeclarationExtension α) (env : Environment) (declName : Name) (val : α) : Environment :=
   have : Inhabited Environment := ⟨env⟩
@@ -765,8 +766,8 @@ where
   loop (i : Nat) (env : Environment) : IO Environment := do
     -- Recall that the size of the array stored `persistentEnvExtensionRef` may increase when we import user-defined environment extensions.
     let pExtDescrs ← persistentEnvExtensionsRef.get
-    if i < pExtDescrs.size then
-      let extDescr := pExtDescrs[i]!
+    if h : i < pExtDescrs.size then
+      let extDescr := pExtDescrs[i]
       let s := extDescr.toEnvExtension.getState env
       let prevSize := (← persistentEnvExtensionsRef.get).size
       let prevAttrSize ← getNumBuiltinAttributes
@@ -858,7 +859,7 @@ def finalizeImport (s : ImportState) (imports : Array Import) (opts : Options) (
     numConsts + mod.constants.size + mod.extraConstNames.size
   let mut const2ModIdx : Std.HashMap Name ModuleIdx := Std.HashMap.empty (capacity := numConsts)
   let mut constantMap : Std.HashMap Name ConstantInfo := Std.HashMap.empty (capacity := numConsts)
-  for h:modIdx in [0:s.moduleData.size] do
+  for h : modIdx in [0:s.moduleData.size] do
     let mod := s.moduleData[modIdx]'h.upper
     for cname in mod.constNames, cinfo in mod.constants do
       match constantMap.getThenInsertIfNew? cname cinfo with
@@ -1095,6 +1096,13 @@ def isDefEqGuarded (env : Environment) (lctx : LocalContext) (a b : Expr) : Bool
   When implementing automation, consider using the `MetaM` methods. -/
 @[extern "lean_kernel_whnf"]
 opaque whnf (env : Environment) (lctx : LocalContext) (a : Expr) : Except KernelException Expr
+
+/--
+  Kernel typecheck function. We use it mainly for debugging purposes.
+  Recall that the Kernel type checker does not support metavariables.
+  When implementing automation, consider using the `MetaM` methods. -/
+@[extern "lean_kernel_check"]
+opaque check (env : Environment) (lctx : LocalContext) (a : Expr) : Except KernelException Expr
 
 end Kernel
 

@@ -219,10 +219,13 @@ def reportStuckSyntheticMVar (mvarId : MVarId) (ignoreStuckTC := false) : TermEl
           let mvarDecl ← getMVarDecl mvarId
           unless (← MonadLog.hasErrors) do
             throwError "typeclass instance problem is stuck, it is often due to metavariables{indentExpr mvarDecl.type}{extraErrorMsg}"
-    | .coe header expectedType e f? =>
+    | .coe header expectedType e f? mkErrorMsg? =>
       mvarId.withContext do
-        throwTypeMismatchError header expectedType (← inferType e) e f?
-          m!"failed to create type class instance for{indentExpr (← getMVarDecl mvarId).type}"
+        if let some mkErrorMsg := mkErrorMsg? then
+          throwError (← mkErrorMsg mvarId expectedType e)
+        else
+          throwTypeMismatchError header expectedType (← inferType e) e f?
+            m!"failed to create type class instance for{indentExpr (← getMVarDecl mvarId).type}"
     | _ => unreachable! -- TODO handle other cases.
 
 /--
@@ -257,8 +260,8 @@ private def throwStuckAtUniverseCnstr : TermElabM Unit := do
     unless found.contains (lhs, rhs) do
       found := found.insert (lhs, rhs)
       uniqueEntries := uniqueEntries.push entry
-  for i in [1:uniqueEntries.size] do
-    logErrorAt uniqueEntries[i]!.ref (← mkLevelStuckErrorMessage uniqueEntries[i]!)
+  for h : i in [1:uniqueEntries.size] do
+    logErrorAt uniqueEntries[i].ref (← mkLevelStuckErrorMessage uniqueEntries[i]!)
   throwErrorAt uniqueEntries[0]!.ref (← mkLevelStuckErrorMessage uniqueEntries[0]!)
 
 /--
@@ -316,6 +319,18 @@ def PostponeBehavior.ofBool : Bool → PostponeBehavior
   | true  => .yes
   | false => .no
 
+private def TacticMVarKind.logError (tacticCode : Syntax) (kind : TacticMVarKind) : TermElabM Unit := do
+  match kind with
+  | term => pure ()
+  | autoParam argName => logErrorAt tacticCode m!"could not synthesize default value for parameter '{argName}' using tactics"
+  | fieldAutoParam fieldName structName => logErrorAt tacticCode m!"could not synthesize default value for field '{fieldName}' of '{structName}' using tactics"
+
+private def TacticMVarKind.maybeWithoutRecovery (kind : TacticMVarKind) (m : TacticM α) : TacticM α := do
+  if kind matches .autoParam .. | .fieldAutoParam .. then
+    withoutErrToSorry <| Tactic.withoutRecover <| m
+  else
+    m
+
 mutual
 
   /--
@@ -325,7 +340,7 @@ mutual
 
   If `report := false`, then `runTactic` will not capture exceptions nor will report unsolved goals. Unsolved goals become exceptions.
   -/
-  partial def runTactic (mvarId : MVarId) (tacticCode : Syntax) (report := true) : TermElabM Unit := withoutAutoBoundImplicit do
+  partial def runTactic (mvarId : MVarId) (tacticCode : Syntax) (kind : TacticMVarKind) (report := true) : TermElabM Unit := withoutAutoBoundImplicit do
     instantiateMVarDeclMVars mvarId
     /-
     TODO: consider using `runPendingTacticsAt` at `mvarId` local context and target type.
@@ -342,7 +357,7 @@ mutual
     in more complicated scenarios.
     -/
     tryCatchRuntimeEx
-      (do let remainingGoals ← withInfoHole mvarId <| Tactic.run mvarId do
+      (do let remainingGoals ← withInfoHole mvarId <| Tactic.run mvarId <| kind.maybeWithoutRecovery do
             withTacticInfoContext tacticCode do
               -- also put an info node on the `by` keyword specifically -- the token may be `canonical` and thus shown in the info
               -- view even though it is synthetic while a node like `tacticCode` never is (#1990)
@@ -354,10 +369,13 @@ mutual
               synthesizeSyntheticMVars (postpone := .no)
           unless remainingGoals.isEmpty do
             if report then
+              kind.logError tacticCode
               reportUnsolvedGoals remainingGoals
             else
               throwError "unsolved goals\n{goalsToMessageData remainingGoals}")
       fun ex => do
+        if report then
+          kind.logError tacticCode
         if report && (← read).errToSorry then
           for mvarId in (← getMVars (mkMVar mvarId)) do
             mvarId.admit
@@ -371,7 +389,7 @@ mutual
     withRef mvarSyntheticDecl.stx do
     match mvarSyntheticDecl.kind with
     | .typeClass extraErrorMsg? => synthesizePendingInstMVar mvarId extraErrorMsg?
-    | .coe _header? expectedType e _f? => mvarId.withContext do
+    | .coe _header? expectedType e _f? _ => mvarId.withContext do
       if (← withDefault do isDefEq (← inferType e) expectedType) then
         -- Types may be defeq now due to mvar assignments, type class
         -- defaulting, etc.
@@ -385,10 +403,10 @@ mutual
       return false
     -- NOTE: actual processing at `synthesizeSyntheticMVarsAux`
     | .postponed savedContext => resumePostponed savedContext mvarSyntheticDecl.stx mvarId postponeOnError
-    | .tactic tacticCode savedContext =>
+    | .tactic tacticCode savedContext kind =>
       withSavedContext savedContext do
         if runTactics then
-          runTactic mvarId tacticCode
+          runTactic mvarId tacticCode kind
           return true
         else
           return false
@@ -512,7 +530,7 @@ private partial def withSynthesizeLightImp (k : TermElabM α) : TermElabM α := 
   finally
     modify fun s => { s with pendingMVars := s.pendingMVars ++ pendingMVarsSaved }
 
-/-- Similar to `withSynthesize`, but uses `postpone := .true`, does not use use `synthesizeUsingDefault` -/
+/-- Similar to `withSynthesize`, but uses `postpone := .true`, does not use `synthesizeUsingDefault` -/
 @[inline] def withSynthesizeLight [MonadFunctorT TermElabM m] (k : m α) : m α :=
   monadMap (m := TermElabM) (withSynthesizeLightImp ·) k
 
@@ -529,9 +547,9 @@ the result of a tactic block.
 def runPendingTacticsAt (e : Expr) : TermElabM Unit := do
   for mvarId in (← getMVars e) do
     let mvarId ← getDelayedMVarRoot mvarId
-    if let some { kind := .tactic tacticCode savedContext, .. } ← getSyntheticMVarDecl? mvarId then
+    if let some { kind := .tactic tacticCode savedContext kind, .. } ← getSyntheticMVarDecl? mvarId then
       withSavedContext savedContext do
-        runTactic mvarId tacticCode
+        runTactic mvarId tacticCode kind
         markAsResolved mvarId
 
 builtin_initialize

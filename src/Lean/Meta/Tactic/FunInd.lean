@@ -51,7 +51,7 @@ Here "branch" roughly corresponds to tail-call positions: branches of top-level
 For every recursive call in that branch, an induction hypothesis asserting the
 motive for the arguments of the recursive call is provided.
 If the recursive call is under binders and it, or its proof of termination,
-depend on the the bound values, then these become assumptions of the inductive
+depend on the bound values, then these become assumptions of the inductive
 hypothesis.
 
 Additionally, the local context of the branch (e.g. the condition of an
@@ -257,13 +257,14 @@ fails.
 partial def foldAndCollect (oldIH newIH : FVarId) (isRecCall : Expr → Option Expr) (e : Expr) : M Expr := do
   unless e.containsFVar oldIH do
     return e
+  withTraceNode `Meta.FunInd (pure m!"{exceptEmoji ·} foldAndCollect:{indentExpr e}") do
 
   let e' ← id do
     if let some (n, t, v, b) := e.letFun? then
       let t' ← foldAndCollect oldIH newIH isRecCall t
       let v' ← foldAndCollect oldIH newIH isRecCall v
-      return ← withLetDecl n t' v' fun x => do
-        M.localMapM (mkLetFVars (usedLetOnly := true) #[x] ·) do
+      return ← withLocalDeclD n t' fun x => do
+        M.localMapM (mkLetFun x v' ·) do
           let b' ← foldAndCollect oldIH newIH isRecCall (b.instantiate1 x)
           mkLetFun x v' b'
 
@@ -319,10 +320,10 @@ partial def foldAndCollect (oldIH newIH : FVarId) (isRecCall : Expr → Option E
     if e.getAppArgs.any (·.isFVarOf oldIH) then
       -- Sometimes Fix.lean abstracts over oldIH in a proof definition.
       -- So beta-reduce that definition. We need to look through theorems here!
-      let e' ← withTransparency .all do whnf e
-      if e == e' then
+      if let some e' ← withTransparency .all do unfoldDefinition? e then
+        return ← foldAndCollect oldIH newIH isRecCall e'
+      else
         throwError "foldAndCollect: cannot reduce application of {e.getAppFn} in:{indentExpr e} "
-      return ← foldAndCollect oldIH newIH isRecCall e'
 
     match e with
     | .app e1 e2 =>
@@ -462,6 +463,7 @@ def M2.branch {α} (act : M2 α) : M2 α :=
 /-- Base case of `buildInductionBody`: Construct a case for the final induction hypthesis.  -/
 def buildInductionCase (oldIH newIH : FVarId) (isRecCall : Expr → Option Expr) (toClear : Array FVarId)
     (goal : Expr)  (e : Expr) : M2 Expr := do
+  withTraceNode `Meta.FunInd (pure m!"{exceptEmoji ·} buildInductionCase:{indentExpr e}") do
   let _e' ← foldAndCollect oldIH newIH isRecCall e
   let IHs : Array Expr ← M.ask
   let IHs ← deduplicateIHs IHs
@@ -495,7 +497,7 @@ def mkLambdaFVarsMasked (xs : Array Expr) (e : Expr) : MetaM (Array Bool × Expr
   let mut xs := xs
   let mut mask := #[]
   while ! xs.isEmpty do
-    let discr := xs.back
+    let discr := xs.back!
     if discr.isFVar && e.containsFVar discr.fvarId! then
         e ← mkLambdaFVars #[discr] e
         mask := mask.push true
@@ -518,6 +520,8 @@ as `MVars` as it goes.
 -/
 partial def buildInductionBody (toClear : Array FVarId) (goal : Expr)
     (oldIH newIH : FVarId) (isRecCall : Expr → Option Expr) (e : Expr) : M2 Expr := do
+  withTraceNode `Meta.FunInd
+    (pure m!"{exceptEmoji ·} buildInductionBody: {oldIH.name} → {newIH.name}:{indentExpr e}") do
 
   -- if-then-else cause case split:
   match_expr e with
@@ -598,6 +602,11 @@ partial def buildInductionBody (toClear : Array FVarId) (goal : Expr)
           buildInductionBody toClear expAltType oldIH newIH isRecCall alt)
       return matcherApp'.toExpr
 
+  -- we look through mdata
+  if e.isMData then
+    let b ← buildInductionBody toClear goal oldIH newIH isRecCall e.mdataExpr!
+    return e.updateMData! b
+
   if let .letE n t v b _ := e then
     let t' ← foldAndCollect oldIH newIH isRecCall t
     let v' ← foldAndCollect oldIH newIH isRecCall v
@@ -608,7 +617,7 @@ partial def buildInductionBody (toClear : Array FVarId) (goal : Expr)
   if let some (n, t, v, b) := e.letFun? then
     let t' ← foldAndCollect oldIH newIH isRecCall t
     let v' ← foldAndCollect oldIH newIH isRecCall v
-    return ← withLocalDecl n .default t' fun x => M2.branch do
+    return ← withLocalDeclD n t' fun x => M2.branch do
       let b' ← buildInductionBody toClear goal oldIH newIH isRecCall (b.instantiate1 x)
       mkLetFun x v' b'
 
@@ -643,7 +652,7 @@ def abstractIndependentMVars (mvars : Array MVarId) (index : Nat) (e : Expr) : M
       pure mvar
   trace[Meta.FunInd] "abstractIndependentMVars, reverted mvars: {mvars}"
   let decls := mvars.mapIdx fun i mvar =>
-    (.mkSimple s!"case{i.val+1}", (fun _ => mvar.getType))
+    (.mkSimple s!"case{i+1}", (fun _ => mvar.getType))
   Meta.withLocalDeclsD decls fun xs => do
       for mvar in mvars, x in xs do
         mvar.assign x
@@ -662,12 +671,20 @@ def deriveUnaryInduction (name : Name) : MetaM Name := do
   let varNames ← forallTelescope info.type fun xs _ => xs.mapM (·.fvarId!.getUserName)
 
   -- Uses of WellFounded.fix can be partially applied. Here we eta-expand the body
-  -- to avoid dealing with this
-  let e ← lambdaTelescope info.value fun params body => do mkLambdaFVars params (← etaExpand body)
+  -- to make sure that `target` indeed the last parameter
+  let e := info.value
+  let e ← lambdaTelescope e fun params body => do
+    if body.isAppOfArity ``WellFounded.fix 5 then
+      forallBoundedTelescope (← inferType body) (some 1) fun xs _ => do
+        unless xs.size = 1 do
+          throwError "functional induction: Failed to eta-expand{indentExpr e}"
+        mkLambdaFVars (params ++ xs) (mkAppN body xs)
+    else
+      pure e
   let e' ← lambdaTelescope e fun params funBody => MatcherApp.withUserNames params varNames do
     match_expr funBody with
     | fix@WellFounded.fix α _motive rel wf body target =>
-      unless params.back == target do
+      unless params.back! == target do
         throwError "functional induction: expected the target as last parameter{indentExpr e}"
       let fixedParams := params.pop
       let motiveType ← mkForallFVars #[target] (.sort levelZero)
@@ -703,14 +720,18 @@ def deriveUnaryInduction (name : Name) : MetaM Name := do
         let e' ← mkLambdaFVars #[motive] e'
 
         -- We could pass (usedOnly := true) below, and get nicer induction principles that
-        -- do do not mention odd unused parameters.
+        -- do not mention odd unused parameters.
         -- But the downside is that automatic instantiation of the principle (e.g. in a tactic
         -- that derives them from an function application in the goal) is harder, as
         -- one would have to infer or keep track of which parameters to pass.
         -- So for now lets just keep them around.
         let e' ← mkLambdaFVars (binderInfoForMVars := .default) fixedParams e'
         instantiateMVars e'
-    | _ => throwError "Function {name} not defined via WellFounded.fix:{indentExpr funBody}"
+    | _ =>
+      if funBody.isAppOf ``WellFounded.fix then
+        throwError "Function {name} defined via WellFounded.fix with unexpected arity {funBody.getAppNumArgs}:{indentExpr funBody}"
+      else
+        throwError "Function {name} not defined via WellFounded.fix:{indentExpr funBody}"
 
   unless (← isTypeCorrect e') do
     logError m!"failed to derive a type-correct induction principle:{indentExpr e'}"
@@ -789,7 +810,7 @@ def cleanPackedArgs (eqnInfo : WF.EqnInfo) (value : Expr) : MetaM Expr := do
     if e.isAppOf eqnInfo.declNameNonRec then
       let args := e.getAppArgs
       if eqnInfo.fixedPrefixSize + 1 ≤ args.size then
-        let packedArg := args.back
+        let packedArg := args.back!
           let (i, unpackedArgs) ← eqnInfo.argsPacker.unpack packedArg
           let e' := .const eqnInfo.declNames[i]! e.getAppFn.constLevels!
           let e' := mkAppN e' args.pop
@@ -819,7 +840,7 @@ def unpackMutualInduction (eqnInfo : WF.EqnInfo) (unaryInductName : Name) : Meta
     unless motive.isFVar && targets.size = 1 && targets.all (·.isFVar) do
       throwError "conclusion {concl} does not look like a packed motive application"
     let packedTarget := targets[0]!
-    unless xs.back == packedTarget do
+    unless xs.back! == packedTarget do
       throwError "packed target not last argument to {unaryInductName}"
     let some motivePos := xs.findIdx? (· == motive)
       | throwError "could not find motive {motive} in {xs}"
@@ -918,7 +939,7 @@ def deriveInductionStructural (names : Array Name) (numFixed : Nat) : MetaM Unit
       unless brecOnTargets.all (·.isFVar) do
         throwError "the indices and major argument of the brecOn application are not variables:{indentExpr body}"
       unless brecOnExtras.all (·.isFVar) do
-        throwError "the extra arguments to the the brecOn application are not variables:{indentExpr body}"
+        throwError "the extra arguments to the brecOn application are not variables:{indentExpr body}"
       let lvl :: indLevels := us |throwError "Too few universe parameters in .brecOn application:{indentExpr body}"
 
       let group : Structural.IndGroupInst := { Structural.IndGroupInfo.ofInductiveVal indInfo with
@@ -959,7 +980,7 @@ def deriveInductionStructural (names : Array Name) (numFixed : Nat) : MetaM Unit
             mkForallFVars ys (.sort levelZero)
         let motiveArities ← infos.mapM fun info => do
           lambdaTelescope (← instantiateLambda info.value xs) fun ys _ => pure ys.size
-        let motiveDecls ← motiveTypes.mapIdxM fun ⟨i,_⟩ motiveType => do
+        let motiveDecls ← motiveTypes.mapIdxM fun i motiveType => do
           let n := if infos.size = 1 then .mkSimple "motive"
                                      else .mkSimple s!"motive_{i+1}"
           pure (n, fun _ => pure motiveType)
@@ -1037,11 +1058,11 @@ def deriveInductionStructural (names : Array Name) (numFixed : Nat) : MetaM Unit
                 pure e
               brecOnApps := brecOnApps.push e
             mkLetFVars minors' (← PProdN.mk 0 brecOnApps)
-          let e' ← abstractIndependentMVars mvars (← motives.back.fvarId!.getDecl).index e'
+          let e' ← abstractIndependentMVars mvars (← motives.back!.fvarId!.getDecl).index e'
           let e' ← mkLambdaFVars motives e'
 
           -- We could pass (usedOnly := true) below, and get nicer induction principles that
-          -- do do not mention odd unused parameters.
+          -- do not mention odd unused parameters.
           -- But the downside is that automatic instantiation of the principle (e.g. in a tactic
           -- that derives them from an function application in the goal) is harder, as
           -- one would have to infer or keep track of which parameters to pass.
